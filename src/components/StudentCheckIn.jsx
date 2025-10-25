@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { Camera, ShieldCheck, QrCode, Eye, EyeOff, CheckCircle2, AlertCircle } from 'lucide-react';
+import { Camera, ShieldCheck, QrCode, Eye, EyeOff, CheckCircle2, AlertCircle, RotateCcw } from 'lucide-react';
 
 export default function StudentCheckIn({ session, roster, onCheckIn, saveFaceTemplate, loadFaceTemplate }) {
   const [tab, setTab] = useState('face'); // 'face' | 'qr'
@@ -57,28 +57,78 @@ function FaceFlow({ session, studentId, onCheckIn, saveFaceTemplate, loadFaceTem
   const [livePassed, setLivePassed] = useState(false);
   const [hasTemplate, setHasTemplate] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [devices, setDevices] = useState([]);
+  const [selectedDeviceId, setSelectedDeviceId] = useState('');
+  const [permission, setPermission] = useState('unknown'); // 'unknown'|'granted'|'denied'
+  const [errorHint, setErrorHint] = useState('');
+  const [facingUser, setFacingUser] = useState(true);
+
+  const insecureContext = typeof window !== 'undefined' && window.isSecureContext === false && !/(localhost|127\.0\.0\.1)/.test(window.location.hostname);
 
   useEffect(() => {
     setHasTemplate(!!loadFaceTemplate(studentId));
   }, [studentId, loadFaceTemplate]);
 
   useEffect(() => {
-    return () => {
-      stopCamera();
+    const checkPermissions = async () => {
+      try {
+        if (navigator.permissions && navigator.permissions.query) {
+          // Some browsers gate this behind flags; ignore if it throws
+          const res = await navigator.permissions.query({ name: 'camera' });
+          setPermission(res.state);
+          res.onchange = () => setPermission(res.state);
+        }
+      } catch {}
     };
+    checkPermissions();
+    return () => { stopCamera(); };
   }, []);
 
-  const startCamera = async () => {
+  const enumerateCameras = async () => {
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user' }, audio: false });
+      const list = await navigator.mediaDevices.enumerateDevices();
+      const cams = list.filter((d) => d.kind === 'videoinput');
+      setDevices(cams);
+      if (!selectedDeviceId && cams[0]) setSelectedDeviceId(cams[0].deviceId);
+    } catch {}
+  };
+
+  const requestPermission = async () => {
+    setErrorHint('');
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+      // Immediately stop to just grant permission
+      stream.getTracks().forEach((t) => t.stop());
+      setPermission('granted');
+      await enumerateCameras();
+    } catch (e) {
+      setPermission('denied');
+      setErrorHint(parseMediaError(e));
+    }
+  };
+
+  const startCamera = async () => {
+    if (!session.active) return onCheckIn({ ok: false, text: 'No active session.' });
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      return onCheckIn({ ok: false, text: 'Camera not supported on this device/browser. Use QR + PIN instead.' });
+    }
+    setErrorHint('');
+    try {
+      const constraints = selectedDeviceId
+        ? { video: { deviceId: { exact: selectedDeviceId } }, audio: false }
+        : { video: { facingMode: facingUser ? { ideal: 'user' } : { ideal: 'environment' } }, audio: false };
+
+      const stream = await navigator.mediaDevices.getUserMedia(constraints);
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
         await videoRef.current.play();
       }
       setStreaming(true);
       setLivePassed(false);
+      await enumerateCameras();
     } catch (e) {
-      onCheckIn({ ok: false, text: 'Camera access denied or unavailable.' });
+      setErrorHint(parseMediaError(e));
+      onCheckIn({ ok: false, text: 'Camera access failed. ' + parseMediaError(e) });
     }
   };
 
@@ -89,6 +139,22 @@ function FaceFlow({ session, studentId, onCheckIn, saveFaceTemplate, loadFaceTem
       videoRef.current.srcObject = null;
     }
     setStreaming(false);
+  };
+
+  const switchFacing = async () => {
+    setFacingUser((v) => !v);
+    if (streaming) {
+      stopCamera();
+      await startCamera();
+    }
+  };
+
+  const onDeviceChange = async (id) => {
+    setSelectedDeviceId(id);
+    if (streaming) {
+      stopCamera();
+      await startCamera();
+    }
   };
 
   const captureFrame = () => {
@@ -105,7 +171,6 @@ function FaceFlow({ session, studentId, onCheckIn, saveFaceTemplate, loadFaceTem
   };
 
   const livenessCheck = async () => {
-    // Simple motion-based liveness: measure frame differences over ~1.5s
     const video = videoRef.current;
     const canvas = canvasRef.current;
     if (!video || !canvas) return false;
@@ -135,8 +200,7 @@ function FaceFlow({ session, studentId, onCheckIn, saveFaceTemplate, loadFaceTem
       prev = frame;
       await new Promise((res) => setTimeout(res, 120));
     }
-    // Threshold tuned for basic movement; prompt user to blink/turn head
-    return motionScore > 50; // arbitrary threshold
+    return motionScore > 50;
   };
 
   const enrollFace = async () => {
@@ -150,7 +214,6 @@ function FaceFlow({ session, studentId, onCheckIn, saveFaceTemplate, loadFaceTem
   };
 
   const compareDataUrls = async (a, b) => {
-    // naive pixel diff using canvas
     const imgA = await loadImage(a);
     const imgB = await loadImage(b);
     const w = 120, h = 120;
@@ -194,7 +257,6 @@ function FaceFlow({ session, studentId, onCheckIn, saveFaceTemplate, loadFaceTem
       const captured = captureFrame();
       const template = loadFaceTemplate(studentId);
       const score = await compareDataUrls(captured, template);
-      // threshold: since naive, allow generous tolerance
       if (score < 80) {
         const result = onCheckIn({ studentId, method: 'face' });
         setBusy(false);
@@ -211,24 +273,65 @@ function FaceFlow({ session, studentId, onCheckIn, saveFaceTemplate, loadFaceTem
 
   return (
     <div className="space-y-3">
+      {insecureContext && (
+        <div className="text-xs text-amber-200 bg-amber-500/10 border border-amber-500/30 rounded-md p-2">
+          Camera requires HTTPS or localhost. Open this page over HTTPS to enable camera access.
+        </div>
+      )}
+
+      {!('mediaDevices' in navigator) && (
+        <div className="text-xs text-amber-200 bg-amber-500/10 border border-amber-500/30 rounded-md p-2">
+          Camera API not supported on this device/browser. Use the QR + PIN tab.
+        </div>
+      )}
+
       <div className="rounded-lg border border-white/10 overflow-hidden">
         <div className="bg-black/40 p-3 flex items-center justify-between text-xs text-zinc-300">
           <div className="flex items-center gap-2"><ShieldCheck className="h-4 w-4"/> Liveness {livePassed ? <span className="text-green-400">Passed</span> : <span className="text-zinc-400">Required</span>}</div>
           <div>{hasTemplate ? <span className="text-green-400">Face Enrolled</span> : <span className="text-amber-400">Enrollment Needed</span>}</div>
         </div>
-        <div className="p-3">
+        <div className="p-3 space-y-3">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+            <div>
+              <label className="block text-[11px] text-zinc-400 mb-1">Camera Source</label>
+              <select
+                value={selectedDeviceId}
+                onChange={(e) => onDeviceChange(e.target.value)}
+                className="w-full rounded-md bg-black/40 border border-white/10 px-3 py-2 text-sm"
+              >
+                {devices.length === 0 ? (
+                  <option value="">Default Camera</option>
+                ) : (
+                  devices.map((d, i) => (
+                    <option key={d.deviceId || i} value={d.deviceId}>{d.label || `Camera ${i+1}`}</option>
+                  ))
+                )}
+              </select>
+            </div>
+            <div className="flex items-end gap-2">
+              <button onClick={switchFacing} className="flex-1 rounded-md px-3 py-2 text-sm bg-white/5 hover:bg-white/10 border border-white/10">Switch Facing</button>
+              <button onClick={() => enumerateCameras()} className="rounded-md px-3 py-2 text-sm bg-white/5 hover:bg-white/10 border border-white/10" title="Refresh Cameras"><RotateCcw className="h-4 w-4"/></button>
+            </div>
+          </div>
+
           <div className="aspect-video rounded-md overflow-hidden bg-black/60 border border-white/10 flex items-center justify-center relative">
             <video ref={videoRef} className="w-full h-full object-cover" playsInline muted />
             {!streaming && (
-              <div className="absolute inset-0 flex items-center justify-center">
-                <button onClick={startCamera} className="rounded-lg bg-white/10 border border-white/10 px-4 py-2 text-sm hover:bg-white/20">
-                  Start Camera
-                </button>
+              <div className="absolute inset-0 flex items-center justify-center p-3 text-center">
+                <div className="space-y-2 w-full max-w-xs">
+                  {permission !== 'granted' && (
+                    <button onClick={requestPermission} className="w-full rounded-lg bg-white/10 border border-white/10 px-4 py-2 text-sm hover:bg-white/20">Grant Camera Access</button>
+                  )}
+                  <button onClick={startCamera} className="w-full rounded-lg bg-gradient-to-r from-orange-500 to-amber-600 text-black font-semibold px-4 py-2 text-sm hover:brightness-110 disabled:opacity-50" disabled={insecureContext}>
+                    Start Camera
+                  </button>
+                  {errorHint && <div className="text-[11px] text-amber-200">{errorHint}</div>}
+                </div>
               </div>
             )}
           </div>
           <canvas ref={canvasRef} className="hidden" />
-          <div className="text-[11px] text-zinc-400 mt-2">Tip: Ensure good lighting. For liveness, blink and turn your head slightly.</div>
+          <div className="text-[11px] text-zinc-400">Tip: Ensure good lighting. For liveness, blink and turn your head slightly. On iOS Safari, the camera opens only after a tap.</div>
         </div>
       </div>
 
@@ -279,4 +382,23 @@ function QrPinFlow({ session, studentId, onCheckIn }) {
       <button onClick={submit} disabled={!session.active} className="w-full rounded-lg py-2 text-sm bg-gradient-to-r from-orange-500 to-amber-600 text-black font-semibold hover:brightness-110 disabled:opacity-50">Check-In</button>
     </div>
   );
+}
+
+function parseMediaError(e) {
+  const name = e && (e.name || e.code) || '';
+  switch (name) {
+    case 'NotAllowedError':
+      return 'Permission denied. Enable camera access in your browser settings.';
+    case 'NotFoundError':
+      return 'No camera found. Connect a camera or try another device.';
+    case 'NotReadableError':
+    case 'TrackStartError':
+      return 'Camera is already in use by another app. Close it and try again.';
+    case 'OverconstrainedError':
+      return 'Requested camera not available. Choose a different camera.';
+    case 'SecurityError':
+      return 'Camera blocked due to insecure context. Use HTTPS or localhost.';
+    default:
+      return 'Unable to access the camera on this device.';
+  }
 }

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useMemo, useState } from 'react';
 import Header from './components/Header';
 import SessionControls from './components/SessionControls';
 import StudentCheckIn from './components/StudentCheckIn';
@@ -13,7 +13,7 @@ const initialRoster = [
 ];
 
 export default function App() {
-  const [roster, setRoster] = useState(initialRoster);
+  const [roster] = useState(initialRoster);
   const [records, setRecords] = useState(() =>
     initialRoster.map((s) => ({
       id: s.id,
@@ -31,7 +31,6 @@ export default function App() {
     pin: null,
   });
 
-  // Derived counts
   const stats = useMemo(() => {
     const present = records.filter((r) => r.status !== 'absent').length;
     const late = records.filter((r) => r.status === 'late').length;
@@ -39,7 +38,6 @@ export default function App() {
     return { present, late, absent };
   }, [records]);
 
-  // Attendance analytics by percentage
   const attendancePct = useMemo(() => {
     const total = records.length || 1;
     return Math.round((stats.present / total) * 100);
@@ -49,7 +47,6 @@ export default function App() {
     const id = `SES-${Math.random().toString(36).slice(2, 8).toUpperCase()}`;
     const pin = String(Math.floor(100000 + Math.random() * 900000));
     setSession({ id, active: true, startTime: Date.now(), pin });
-    // reset records for new session
     setRecords(
       roster.map((s) => ({
         id: s.id,
@@ -73,11 +70,9 @@ export default function App() {
     const now = Date.now();
     const lateThresholdMs = 10 * 60 * 1000; // 10 minutes
     const isLate = now - session.startTime > lateThresholdMs;
-
     let duplicate = false;
-    if (records[idx].status !== 'absent') {
-      duplicate = true;
-    }
+    if (records[idx].status !== 'absent') duplicate = true;
+
     const updated = [...records];
     updated[idx] = {
       ...updated[idx],
@@ -120,14 +115,11 @@ export default function App() {
       r.method || '',
       r.checkInTime ? new Date(r.checkInTime).toLocaleString() : '',
     ]);
-    const csv = [headers, ...rows]
-      .map((row) => row.join('\t'))
-      .join('\n');
-    await navigator.clipboard.writeText(csv);
+    const tsv = [headers, ...rows].map((row) => row.join('\t')).join('\n');
+    await navigator.clipboard.writeText(tsv);
     alert('CSV copied to clipboard. Paste into Google Sheets.');
   };
 
-  // Maintain faces per student in localStorage
   const saveFaceTemplate = (studentId, dataUrl) => {
     const key = 'faces.v1';
     const all = JSON.parse(localStorage.getItem(key) || '{}');
@@ -144,7 +136,6 @@ export default function App() {
   return (
     <div className="min-h-screen bg-gradient-to-b from-black via-zinc-900 to-black text-white">
       <Header />
-
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 grid grid-cols-1 lg:grid-cols-3 gap-6">
         <div className="lg:col-span-1 space-y-6">
           <SessionControls
@@ -155,7 +146,6 @@ export default function App() {
             onExportCSV={exportCSV}
             onCopyCSV={copyCSVToClipboard}
           />
-
           <StudentCheckIn
             session={session}
             roster={roster}
@@ -164,7 +154,6 @@ export default function App() {
             loadFaceTemplate={loadFaceTemplate}
           />
         </div>
-
         <div className="lg:col-span-2">
           <Dashboard session={session} records={records} stats={stats} attendancePct={attendancePct} />
         </div>
